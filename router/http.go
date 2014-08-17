@@ -195,7 +195,13 @@ func (h *httpSyncHandler) Set(data *router.Route) error {
 		if err != nil {
 			return err
 		}
-		service = &httpService{name: r.Service, ss: ss, cookieKey: h.l.cookieKey, requests: make(map[string]int32)}
+		service = &httpService{
+			name:      r.Service,
+			ss:        ss,
+			cookieKey: h.l.cookieKey,
+			requests:  make(map[string]int32),
+			listeners: make(map[chan string]interface{}),
+		}
 		h.l.services[r.Service] = service
 	}
 	service.refs++
@@ -383,6 +389,28 @@ type httpService struct {
 	cookieKey  *[32]byte
 	requests   map[string]int32
 	requestMtx sync.RWMutex
+	listeners  map[chan string]interface{}
+	listenMtx  sync.RWMutex
+}
+
+func (s *httpService) AddListener(ch chan string) {
+	s.listenMtx.Lock()
+	s.listeners[ch] = struct{}{}
+	s.listenMtx.Unlock()
+}
+
+func (s *httpService) RemoveListener(ch chan string) {
+	s.listenMtx.Lock()
+	delete(s.listeners, ch)
+	s.listenMtx.Unlock()
+}
+
+func (s *httpService) sendEvent(event string) {
+	s.listenMtx.RLock()
+	defer s.listenMtx.RUnlock()
+	for ch := range s.listeners {
+		ch <- event
+	}
 }
 
 func (s *httpService) getBackend() (*httputil.ClientConn, string) {
@@ -578,6 +606,19 @@ func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, st
 
 		s.requestMtx.Lock()
 		s.requests[addr]--
+		if s.requests[addr] == 0 {
+			s.sendEvent(addr)
+		}
+		all := true
+		for _, n := range s.requests {
+			if n != 0 {
+				all = false
+				break
+			}
+		}
+		if all {
+			s.sendEvent("all")
+		}
 		s.requestMtx.Unlock()
 	}
 }

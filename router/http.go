@@ -195,7 +195,7 @@ func (h *httpSyncHandler) Set(data *router.Route) error {
 		if err != nil {
 			return err
 		}
-		service = &httpService{name: r.Service, ss: ss, cookieKey: h.l.cookieKey}
+		service = &httpService{name: r.Service, ss: ss, cookieKey: h.l.cookieKey, requests: make(map[string]int32)}
 		h.l.services[r.Service] = service
 	}
 	service.refs++
@@ -380,12 +380,14 @@ type httpService struct {
 	ss   discoverd.ServiceSet
 	refs int
 
-	cookieKey *[32]byte
+	cookieKey  *[32]byte
+	requests   map[string]int32
+	requestMtx sync.RWMutex
 }
 
-func (s *httpService) getBackend() *httputil.ClientConn {
-	backend, _ := s.connectBackend()
-	return backend
+func (s *httpService) getBackend() (*httputil.ClientConn, string) {
+	backend, addr := s.connectBackend()
+	return backend, addr
 }
 
 func (s *httpService) connectBackend() (*httputil.ClientConn, string) {
@@ -407,10 +409,10 @@ func (s *httpService) connectBackend() (*httputil.ClientConn, string) {
 
 const stickyCookie = "_backend"
 
-func (s *httpService) getNewBackendSticky() (*httputil.ClientConn, *http.Cookie) {
+func (s *httpService) getNewBackendSticky() (*httputil.ClientConn, string, *http.Cookie) {
 	backend, addr := s.connectBackend()
 	if backend == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	var nonce [24]byte
@@ -422,10 +424,10 @@ func (s *httpService) getNewBackendSticky() (*httputil.ClientConn, *http.Cookie)
 	copy(out, nonce[:])
 	out = secretbox.Seal(out, []byte(addr), &nonce, s.cookieKey)
 
-	return backend, &http.Cookie{Name: stickyCookie, Value: base64.StdEncoding.EncodeToString(out), Path: "/"}
+	return backend, addr, &http.Cookie{Name: stickyCookie, Value: base64.StdEncoding.EncodeToString(out), Path: "/"}
 }
 
-func (s *httpService) getBackendSticky(req *http.Request) (*httputil.ClientConn, *http.Cookie) {
+func (s *httpService) getBackendSticky(req *http.Request) (*httputil.ClientConn, string, *http.Cookie) {
 	cookie, err := req.Cookie(stickyCookie)
 	if err != nil {
 		return s.getNewBackendSticky()
@@ -461,26 +463,29 @@ func (s *httpService) getBackendSticky(req *http.Request) (*httputil.ClientConn,
 	if err != nil {
 		return s.getNewBackendSticky()
 	}
-	return httputil.NewClientConn(backend, nil), nil
+	return httputil.NewClientConn(backend, nil), addr, nil
 }
 
 func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, sticky bool) {
 	for {
 		req.Header.Set("X-Request-Start", strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10))
-		req.Header.Set("X-Request-Id", random.UUID())
 
 		var backend *httputil.ClientConn
+		var addr string
 		var stickyCookie *http.Cookie
 		if sticky {
-			backend, stickyCookie = s.getBackendSticky(req)
+			backend, addr, stickyCookie = s.getBackendSticky(req)
 		} else {
-			backend = s.getBackend()
+			backend, addr = s.getBackend()
 		}
 		if backend == nil {
 			log.Println("no backend found")
 			fail(sc, req, 503, "Service Unavailable")
 			return
 		}
+		s.requestMtx.Lock()
+		s.requests[addr]++
+		s.requestMtx.Unlock()
 
 		if req.Method != "GET" && req.Method != "POST" && req.Method != "HEAD" &&
 			req.Method != "OPTIONS" && req.Method != "PUT" && req.Method != "DELETE" && req.Method != "TRACE" {
@@ -570,6 +575,10 @@ func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, st
 			}
 			return
 		}
+
+		s.requestMtx.Lock()
+		s.requests[addr]--
+		s.requestMtx.Unlock()
 	}
 }
 

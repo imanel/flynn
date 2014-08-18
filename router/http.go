@@ -175,14 +175,7 @@ type httpSyncHandler struct {
 
 func (h *httpSyncHandler) Set(data *router.Route) error {
 	route := data.HTTPRoute()
-	r := &httpRoute{
-		Domain:  route.Domain,
-		Service: route.Service,
-		TLSCert: route.TLSCert,
-		TLSKey:  route.TLSKey,
-		Sticky:  route.Sticky,
-		Paused:  route.Paused,
-	}
+	r := &httpRoute{HTTPRoute: route}
 	r.resumeCond = sync.NewCond(&r.pauseMtx)
 
 	if r.TLSCert != "" && r.TLSKey != "" {
@@ -374,12 +367,7 @@ func (s *HTTPListener) handle(conn net.Conn, isTLS bool) {
 // A domain served by a listener, associated TLS certs,
 // and link to backend service set.
 type httpRoute struct {
-	Domain  string
-	Service string
-	TLSCert string
-	TLSKey  string
-	Sticky  bool
-	Paused  bool
+	*router.HTTPRoute
 
 	keypair    *tls.Certificate
 	service    *httpService

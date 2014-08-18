@@ -149,6 +149,26 @@ func (s *HTTPListener) RemoveRoute(id string) error {
 	return s.ds.Remove(id)
 }
 
+func (s *HTTPListener) AddDrainListener(routeID string, ch chan string) {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	r := s.routes[routeID]
+	srv := s.services[r.Service]
+	srv.listenMtx.Lock()
+	srv.listeners[ch] = struct{}{}
+	srv.listenMtx.Unlock()
+}
+
+func (s *HTTPListener) RemoveDrainListener(routeID string, ch chan string) {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	r := s.routes[routeID]
+	srv := s.services[r.Service]
+	srv.listenMtx.Lock()
+	delete(srv.listeners, ch)
+	srv.listenMtx.Unlock()
+}
+
 type httpSyncHandler struct {
 	l *HTTPListener
 }
@@ -391,18 +411,6 @@ type httpService struct {
 	requestMtx sync.RWMutex
 	listeners  map[chan string]interface{}
 	listenMtx  sync.RWMutex
-}
-
-func (s *httpService) AddListener(ch chan string) {
-	s.listenMtx.Lock()
-	s.listeners[ch] = struct{}{}
-	s.listenMtx.Unlock()
-}
-
-func (s *httpService) RemoveListener(ch chan string) {
-	s.listenMtx.Lock()
-	delete(s.listeners, ch)
-	s.listenMtx.Unlock()
 }
 
 func (s *httpService) sendEvent(event string) {

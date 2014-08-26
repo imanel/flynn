@@ -107,8 +107,6 @@ func main() {
 		}
 	}
 
-	sh.BeforeExit(func() { backend.Cleanup() })
-
 	if *force {
 		if err := backend.Cleanup(); err != nil {
 			sh.Fatal(err)
@@ -220,7 +218,12 @@ func main() {
 
 		h.Jobs = state.ClusterJobs()
 		jobs := make(chan *host.Job)
-		hostErr := cluster.RegisterHost(h, jobs)
+		stream := cluster.RegisterHost(h, jobs)
+		sh.BeforeExit(func() {
+			g.Log(grohl.Data{"at": "shutdown"})
+			stream.Close()
+			backend.Cleanup()
+		})
 		g.Log(grohl.Data{"at": "host_registered"})
 		for job := range jobs {
 			if *externalAddr != "" {
@@ -234,7 +237,7 @@ func main() {
 				state.SetStatusFailed(job.ID, err)
 			}
 		}
-		g.Log(grohl.Data{"at": "sampi_disconnected", "err": *hostErr})
+		g.Log(grohl.Data{"at": "sampi_disconnected", "err": stream.Err})
 
 		<-newLeader
 	}
